@@ -8,7 +8,12 @@ Created on Wed Mar 30 15:29:16 2016
 import pandas as pd
 import numpy as np
 from scipy.signal import argrelextrema
+from scipy.optimize import leastsq
 from scipy.special import  binom
+import matplotlib.pyplot as plt
+import matplotlib.widgets as widgets
+import sys
+import pdb
 
 def is_number(s):
     try:
@@ -16,7 +21,7 @@ def is_number(s):
         return True
     except ValueError:
         pass
-     
+
     try:
         import unicodedata
         unicodedata.numeric(s)
@@ -32,7 +37,7 @@ def edgedetector(x):
     X = x.sort()
     diff = x[1:] - x[:-1]
     values = []
-    for index,_ in enumerate(diff[10:-10]):
+    for index, _ in enumerate(diff[10:-10]):
         if index > 20:
             a = diff[index    : index +  10]
             b = diff[index + 10: index + 20]
@@ -43,37 +48,50 @@ def edgedetector(x):
     return values
 
 
-def readdata(path, sourcetype = 'MPMS', columns = 0, skiprows = 0):
+def readdata(path, sourcetype='MPMS', columns=0, skiprows=0):
     """Function to read magnetization data from various sources
     """
     import types
     if sourcetype == 'MPMS':
-        df = pd.read_csv(path, skiprows = 30, header = 0, usecols = (2,3,4))
-        df.columns = pd.Index(['magnetic field', 'temperature', 'magnetic moment'])
-        df['magnetic field'] *= 1e-4
-        df['magnetic moment'] *= 1e-3
-        df.units = ['T', 'K', 'J/T']
+        if path.split('.')[-1].lower() == 'dat':
+            df = pd.read_csv(path, skiprows=30, header=0, usecols=(0, 2, 3, 4))
+            df[2] *= 1e-3 #bringing the magnetic moment to SI-units
+        elif path.split('.')[-1].lower() == 'raw':
+            #first check if the .diag-file does exist in the folder
+            #refit
+            data, raw_data = raw_reader(path)
+            df = pd.DataFrame(data)
+            df.raw_data = raw_data
+        df.columns = pd.Index(['time', 'magnetic field', 'temperature', 'magnetic moment'])
+        df['magnetic field'] *= 1e-4 #bringing the field to SI-units
+        df.units = {'time':'s', 'magnetic field':'T', 'temperature':'K', 'magnetic moment':'J/T'}
+
     elif sourcetype == 'nijmegen':
         with open(path) as datei:
             line = datei.readline()
         if all(is_number(x) for x in line.split()):
-            df = pd.read_csv(path, usecols=(1,6), delimiter ='\t')
+            df = pd.read_csv(path, usecols=(1, 6), delimiter='\t')
             df.columns = pd.Index(['magnetic moment', 'magnetic field'])
-            df = df[df['magnetic field'] > 0.25] #measurements for fields smaller than 0.25T in Nijmegen are generally not giving sensible
+            #measurements for fields smaller than 0.25T in Nijmegen are
+            #generally not giving good data
+            df = df[df['magnetic field'] > 0.25]
             df['magnetic moment'] = 1/df['magnetic moment']
             df['magnetic moment'] -= df['magnetic moment'][df['magnetic field'].argmin()]
             df['magnetic moment'] /= np.maximum(df['magnetic field'], 0.01)
             df['magnetic moment'] = df['magnetic moment'].abs()
             ##        df.units = ['T', 'K', 'arbitrary']
-            a,b,g = 0.88468 , 5.1038E-6 , -2.0107E-9
+            a, b, g = 0.88468, 5.1038E-6, -2.0107E-9
             pos = 10 * float(path.split()[0])
             T = float(path.split()[0].strip('K'))
-            par=[7.96312,-0.00027,-9.5654E-8,1.4304E-11,-5.7695E-16]
-            df['magnetic field']=a*df['magnetic field'] + b*df['magnetic field']**3 + g*df['magnetic field']**5
-            faktor=(par[0] + pos**2*par[1] + pos**4*par[2] + pos**6*par[3] + pos**8*par[4])/par[0]
+            par=[7.96312, -0.00027, -9.5654E-8, 1.4304E-11, -5.7695E-16]
+            df['magnetic field'] = a*df['magnetic field']    \
+                                 + b*df['magnetic field']**3 \
+                                 + g*df['magnetic field']**5
+            faktor = par[0] + pos**2*par[1] + pos**4*par[2] + pos**6*par[3] + pos**8*par[4]
+            faktor /= par[0]            
             df['magnetic field'] = df['magnetic field'] * faktor
     #        gradient = 2*pos*par[1] + 4*pos**3*par[2] + 6*pos**5*par[3] + 8*pos**7*par[4]
-            df['temperature'] = np.zeros_like(df['magnetic field']) + T
+            df['temperature'] = T
         else:
             df = pd.read_csv(path, skiprows = 3, usecols=(1,2,3))
             df.columns = pd.Index(['magnetic field', 'temperature', 'magnetic moment'])
@@ -82,7 +100,9 @@ def readdata(path, sourcetype = 'MPMS', columns = 0, skiprows = 0):
             df['magnetic moment'] -= df['magnetic moment'][df['magnetic field'].argmin()]
             df['magnetic moment'] /= np.maximum(df['magnetic field'], 0.01)
             df['magnetic moment'] = df['magnetic moment'].abs()
-            df.units = ['T', 'K', 'arbitrary']
+
+        df['time'] = 0 #add a dummy time variable
+        df.units = {'time':'s', 'magnetic field':'T', 'temperature':'K', 'magnetic moment':'arbitrary'}
 
 
 
@@ -97,6 +117,7 @@ def readdata(path, sourcetype = 'MPMS', columns = 0, skiprows = 0):
     df.derivative = types.MethodType(derivative, df)
     df.smooth = types.MethodType(smooth, df)
     df.binning = types.MethodType(binning, df)
+    df.checkfit = types.MethodType(checkfit, df)
     
     return df
 
@@ -133,7 +154,7 @@ def binning(self, x='temperature', dimension=1):
     #calculating the differences
     trange = np.arange(self[x].min(), self[x].max(), .1)
     #calculate a density estimate with a gaussian kernel of h=.1, which seems appropriate for usual SQUID-data 
-    dens = p( trange, self[x], h=.1 )
+    dens = gauss_dens( trange, self[x], h=.1 )
     #finding the localmaxima of the estimated density
     ext_indices = argrelextrema(dens, np.greater, mode = 'wrap')[0]
     #finding the initial centers as the above found extremal points
@@ -154,7 +175,7 @@ def binning(self, x='temperature', dimension=1):
     self.drop_duplicates(inplace = True)
 #    self = new_data
 
-def p(X, Y, h):
+def gauss_dens(X, Y, h):
     """ X: range of values
         Y: data points
     """
@@ -252,3 +273,17 @@ def central_finite_diff(x,y,N,order):
     for k,factor in enumerate(factors[4-(N-1)/2:5+(N-1)/2]):
         out += factor * y[k : L - N + k + 1]
     return out/h**order
+
+
+execfile('maganalyzer_functions.py')
+
+if __name__ == "__main__":
+#    ar = readdata('20160208_TlCuCl3_M(T,H)_1.8K-3.6K_5.8T-7T.rso.raw')
+    ar = readdata('mpms-testdata.rso.raw')
+    ar.checkfit(abscissa = 'temperature')
+    
+    
+## get the inverse of the transformation from data coordinates to pixels
+#transf = ax.transData.inverted()
+#bb = t.get_window_extent(renderer = f.canvas.renderer)
+#bb_datacoords = bb.transformed(transf)
