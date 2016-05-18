@@ -175,6 +175,7 @@ def _cleanup(self, kind = 'gaussian'):
 
 class chooseablepoints:
     def __init__(self, df, abscissa = 'temperature'):
+        self.flag = False
         """
         Input:
             df: dataframe with magnetic field, temperature, magnetic moment
@@ -186,9 +187,9 @@ class chooseablepoints:
         """initialize the fitparameter"""
         self.p = [0, 0, 0, 0]
         pnames = ['z0', 'V', 'B0', 'B1']
-        
+
         """prepare the figure and axes---"""
-        self.fig = plt.figure(figsize=(10,10))
+        self.fig = plt.figure(figsize=(13,10))
         self.ax1 = self.fig.add_axes([0.3,0.7,.6,.2])
         self.ax1.xaxis.set_label_coords(.5, -.15)
         self.ax1.yaxis.set_label_coords(-.08, .5)
@@ -211,10 +212,18 @@ class chooseablepoints:
         for side in self.ax2.spines: 
             self.ax2.spines[side].set_color('red')
             self.ax2.spines[side].set_linewidth(4)
-        self.fit_but_ax = self.fig.add_axes([0.1, .6, .1, .1])
 
-        self.fit_button = widgets.Button(self.fit_but_ax, 'FIT', color='white', hovercolor='0.975')
+        self.fit_but_ax = self.fig.add_axes([0., .95, .1, .05])
+        self.fit_button = widgets.Button(self.fit_but_ax, '(f)it', color='white', hovercolor='0.975')
         self.fit_button.on_clicked(self.fit_button_action)
+
+        self.del_but_ax = self.fig.add_axes([0.1, .95, .1, .05])
+        self.del_button = widgets.Button(self.del_but_ax, 'de(l)ete', color='white', hovercolor='0.975')
+        self.del_button.on_clicked(self.del_button_action)
+
+        self.reset_but_ax = self.fig.add_axes([0.2, .95, .1, .05])
+        self.reset_button = widgets.Button(self.reset_but_ax, 're(s)et', color='white', hovercolor='0.975')
+        self.reset_button.on_clicked(self.reset_button_action)
 
         self.info_ax = self.fig.add_axes([0.1, .8, .1, .1], axisbg = 'g', alpha=.5)
         self.info_ax.set_xticks([])
@@ -243,21 +252,32 @@ class chooseablepoints:
 
         
         self.chosen_inds = []
+        self.disregarded = {}
         self.update_data_plot()
         self.update_chosen_plot()
 
         self.raw_plts = []
+        self.raw_plts_not = []
         self.fit_plts = []
 
-
-                                              
         self.cid_press = self.fig.canvas.mpl_connect('button_press_event', self.on_press)
         self.data_pick = self.fig.canvas.mpl_connect('pick_event', self.onpick_data)
         self.cidmotion = self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
         self.keypress = self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.keyrelease = self.fig.canvas.mpl_connect('key_release_event', self.on_key_release)
+
+        self.from_raw_artists = []
+        self.to_raw_artists = []
+        self.change_indices = []
+
+        # Creating a timer with a interval of 100 ms
+        self.timer = self.fig.canvas.new_timer(interval=1000)
+        self.timer.add_callback(self.handle_raw_queue, self.from_raw_artists, self.to_raw_artists, self.change_indices)
+        self.timer.start()
+#ar.c.timer.remove_callback(ar.c.handle_raw_queue)
         plt.show()
 
+    """---------functions for the radiobuttons (choose x and y of plot"""
     def on_clicked_radiox(self, label):
         self.abscissa = label
         self.update_data_plot()
@@ -281,10 +301,8 @@ class chooseablepoints:
         self.ax1.set_ylabel(self.ordinate + ' in ' + self.df.units[self.ordinate])
         try:
             self.data_plt.set_data(self.df[self.abscissa], self.df[self.ordinate])
-            print 'only update'
         except Exception as error:
-            print error
-            self.data_plt,   = self.ax1.plot(self.df[self.abscissa], self.df[self.ordinate], 'bo', markersize = 4, picker = 20)
+            self.data_plt,   = self.ax1.plot(self.df[self.abscissa], self.df[self.ordinate], 'bo', markersize = 4, picker = 8)
 
     def update_chosen_plot(self):
         x = self.df[self.abscissa][np.array(self.chosen_inds, dtype  = int)]
@@ -307,32 +325,129 @@ class chooseablepoints:
         except Exception as error:
             pass
         
-
     def on_key_press(self, event):
         if event.key == 'shift':
             self.shift = True
-        elif event.key == 'delete':
+            print 'shift'
+        elif event.key == 'l':
             self.delete_data()
+        elif event.key == 'f':
+            self.fit_data()
+        elif event.key == 's':
+            self.reset_data()
         sys.stdout.flush()           
 
     def on_key_release(self, event):
         if event.key == 'shift':
             self.shift = False
-        
-    def onpick_data(self, event):
-        index = event.ind.min()
-        if self.shift: #if the shift key is pressed
-            #reset the sliders
-            for slider in self.slider:
-                slider.reset()
-        
-            self.update_raw(index)
-            self.update_chosen_plot()
-        else:
-            self.info_index = index
-            self.update_info_plot()
-        
 
+    def handle_raw_queue(self, from_raw_artists, to_raw_artists, change_indices):
+        print 'start', change_indices
+        #create a dict of lists to store the indices we already worked on for each artist
+        #to not use duplicates a->b->a will not occur as the mouse would have to be moved
+        listen = dict((artist, []) for artist in set(from_raw_artists))
+        for i, index in enumerate(change_indices):
+            origin = from_raw_artists[i]
+            #if the index has not yet been worked on
+            if not index in listen[origin]:
+                #we mark ir as "worked on"
+                listen[from_raw_artists[i]].append(index)
+                #get the correct destination for this point
+                destination = to_raw_artists[i]
+                #get the origin data
+                x, y = origin.get_data()
+                #get the destination data
+                x_neu, y_neu = destination.get_data()
+                #add the chosen point to the data
+                x_neu, y_neu = np.append(x_neu, x[index]), np.append(y_neu, y[index])
+                #set the new data of the destination
+                destination.set_data((x_neu, y_neu))
+
+        #now loop over the dict to remove all changed data from the destinations
+        for artist in listen:
+            indices = np.array(listen[artist])
+            x, y = artist.get_data()
+            mask = np.ones(x.shape[0], dtype = bool)
+            mask[indices] = 0
+            #set thje new data
+            artist.set_data((x[mask], y[mask]))
+        self.from_raw_artists = []
+        self.to_raw_artists = []
+        print self.change_indices
+        self.change_indices = []
+        print self.change_indices
+
+
+#            #get a set of all indices for that artist that should be changed
+#            index_set = set([i for i,_ in enumerate(indices) if artist == from_raw_artists[i]])
+#            
+#        #loop through all the queued sources
+#        for i, origin in enumerate(from_raw_artist):
+
+    def onpick_data(self, event):
+        self.flag = not self.flag
+        index = event.ind.min()
+        if event.mouseevent.inaxes == self.ax1:
+            if self.shift: #if the shift key is pressed
+                #reset the sliders
+                for slider in self.slider:
+                    slider.reset()
+            
+                self.update_raw(index)
+                self.update_chosen_plot()
+            else:
+                self.info_index = index
+                self.update_info_plot()
+        elif event.mouseevent.inaxes == self.ax2:
+            if event.artist in self.raw_plts:
+                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts) if artist == event.artist)
+                destination = self.raw_plts_not[artist_ind]
+            elif event.artist in self.raw_plts_not:
+                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts_not) if artist == event.artist)
+                destination = self.raw_plts[artist_ind]
+            self.from_raw_artists.append(event.artist)
+            self.to_raw_artists.append(destination)
+            self.change_indices.append(index)
+            print 'added'
+#            #get the data of the picked artist
+#            x, y = event.artist.get_data()
+#            if event.artist in self.raw_plts:
+#                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts) if artist == event.artist)
+#                x_neu, y_neu = self.raw_plts_not[artist_ind].get_data()
+#                x_neu, y_neu= np.append(x_neu, x[index]), np.append(y_neu, y[index])
+#                self.raw_plts_not[artist_ind].set_data((x_neu, y_neu))
+#            elif event.artist in self.raw_plts_not:                
+#                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts_not) if artist == event.artist)
+#                x_neu, y_neu = self.raw_plts[artist_ind].get_data()
+#                x_neu, y_neu= np.append(x_neu, x[index]), np.append(y_neu, y[index])
+#                self.raw_plts[artist_ind].set_data((x_neu, y_neu))
+##                print self.raw_plts[artist_ind].get_data()[0].shape
+##                print 'plot'
+##                print 'not'
+##            for plot_index, artist in enumerate(self.raw_plts_not):
+##                if artist == event.artist:
+##                    print plot_index
+##            try:
+##                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts) if artist == event.artist)
+##                x_neu, y_neu = self.raw_plts_not[artist_ind].get_data()
+##                x_neu, y_neu= np.append(x_neu, x[index]), np.append(y_neu, y[index])
+##                self.raw_plts_not[artist_ind].set_data((x_neu, y_neu))
+##                print 'in fit', artist_ind
+##            except Exception as error:
+##                print error
+##                artist_ind = next(ind for ind, artist in enumerate(self.raw_plts_not) if artist == event.artist)
+##                x_neu, y_neu = self.raw_plts[artist_ind].get_data()
+##                x_neu, y_neu= np.append(x_neu, x[index]), np.append(y_neu, y[index])
+##                self.raw_plts[artist_ind].set_data((x_neu, y_neu))
+##                print 'in_not_fit', artist_ind
+#            print self.raw_plts[artist_ind].get_data()[0].shape
+#            print self.raw_plts_not[artist_ind].get_data()[0].shape
+#            indices = np.r_[:index, index + 1:x.shape[0]]
+#            print index, indices
+#            event.artist.set_data((x[indices], y[indices]))
+#            print 'event'
+        self.fig.canvas.draw()
+            
     def update_fit_est(self):
         index = self.chosen_inds[-1]
         data = self.df.raw_data[self.df.raw_data[:,8] == index]
@@ -362,16 +477,25 @@ class chooseablepoints:
             else:
                 #set the index as the last on the list
                 index = self.chosen_inds[-1]
-                data = self.df.raw_data[self.df.raw_data[:,8] == index][:, 5:7]
+                data = self.df.raw_data[self.df.raw_data[:,8] == index]
 
         else:       
             plt.setp(self.ax2.get_xticklabels(), visible=True)
             plt.setp(self.ax2.get_yticklabels(), visible=True)
-
             #find the corresponding raw-data
-            data = self.df.raw_data[self.df.raw_data[:,8] == index][:, 5:7]
+            data = self.df.raw_data[self.df.raw_data[:,8] == index]
+            mask = self.outside_boundaries(data[:,5])
+            data = data[mask]
             #plot it 
-            plot, = self.ax2.plot(data[:,0], data[:,1], 'bo', markersize = 4)
+            plot, = self.ax2.plot(data[:,5], data[:,6], 'bo', markersize = 4, picker = 5, alpha = .2)
+            #append the plot to the list of raw-data plots
+            self.raw_plts_not.append(plot)
+            #find the corresponding raw-data
+            data = self.df.raw_data[self.df.raw_data[:,8] == index]
+            mask = self.within_boundaries(data[:,5])
+            data = data[mask]
+            #plot it 
+            plot, = self.ax2.plot(data[:,5], data[:,6], 'bo', markersize = 4, picker = 5)
             #append the plot to the list of raw-data plots
             self.raw_plts.append(plot)
             #append the index to the list of indices to keep track of what is shown
@@ -379,7 +503,7 @@ class chooseablepoints:
         
         self.ax2.relim()      # make sure all the data fits
         self.ax2.autoscale()
-        self.p = init_params(data)
+        self.p = init_params(data[:, 5:7])
         self.update_fit_est()
         self.set_slider_bounds(data)
         
@@ -391,26 +515,91 @@ class chooseablepoints:
                 pass
         self.fit_plts = []
 
+    def within_boundaries(self, z):
+        return np.ones(z.shape[0], dtype = bool)
 
+    def outside_boundaries(self, z):
+        return np.zeros(z.shape[0], dtype = bool)
+
+    """---------------------------buttons for reset, fit and delete---------------------------"""
     def fit_button_action(self, event):
+        self.fit_data()
 
+    def fit_data(self, **event):
         self.erase_fit_plts()
         for i, index in enumerate(self.chosen_inds):
-            data = self.df.raw_data[self.df.raw_data[:,8] == index]
-            z = data[:,5]
-            U = data[:,6]
+            #get the sensitivity factor
+            sf = self.df.raw_data[self.df.raw_data[:,8] == index][0, 7]
+            z = self.raw_plts[i].get_xdata() #get the data directly from the plot
+            U = self.raw_plts[i].get_ydata() #get the data directly from the plot
             p = fit(self.p, z, U)
             signal = voltage(p, z) + drift(p, z)
             plot, = self.ax2.plot(z, signal, 'r-')
             self.fit_plts.append(plot)
-            m = _UtoM(p[1])/data[0, 7]*1e-3 #dividing by the sensitivity factor and bring the moment to SI-units
+            m = _UtoM(p[1]) / sf * 1e-3 #dividing by the sensitivity factor and bring the moment to SI-units
             self.df['magnetic moment'][index] = m
         self.update_data_plot()
         self.update_chosen_plot()
 #        self.update_info_plot(self, index):
         self.update_chosen_plot()
         self.fig.canvas.draw()
-            
+
+    def reset_button_action(self, event):
+        self.reset_data()
+
+    def reset_data(self):
+        print 'reset'
+        for index in self.chosen_inds[::-1]:
+            delind = next(delind for delind, value in enumerate(self.chosen_inds) if value == index)
+            #remove it from the list
+            self.chosen_inds.pop(delind)
+            #remove the corresponding plot
+            self.raw_plts[delind].remove()
+            #remove the entry in the list of plots
+            self.raw_plts.pop(delind)
+        self.update_chosen_plot()
+        self.erase_fit_plts()
+        try:
+            self.fit_est.set_data([[],[]])
+        except:
+            pass
+        self.update_data_plot()
+        self.fig.canvas.draw()  
+
+    def del_button_action(self, event):
+        self.delete_data()
+        
+    def delete_data(self):
+        """deletes the chosen data from the dataframe (data AND raw_data)"""
+        indices_to_delete = sorted(self.chosen_inds)
+        for index in self.chosen_inds[::-1]:
+            delind = next(delind for delind, value in enumerate(self.chosen_inds) if value == index)
+            #remove it from the list
+            self.chosen_inds.pop(delind)
+            #remove the corresponding plot
+            self.raw_plts[delind].remove()
+            #remove the entry in the list of plots
+            self.raw_plts.pop(delind)
+            #mark the points in the raw data that can be deleted
+            self.df.raw_data[self.df.raw_data[:,8] == index][:,8] = -1 
+            #reduce the index of all entries with higher indices than the one we want to remove
+            self.df.raw_data[self.df.raw_data[:,8] > index][:,8] -= 1
+        self.df.raw_data = self.df.raw_data[self.df.raw_data[:,8] > -1]
+        self.update_chosen_plot()
+        self.erase_fit_plts()
+        self.info_index = None
+        self.update_info_plot()
+
+        try:
+            self.fit_est.set_data([[],[]])
+        except:
+            pass
+        self.df.drop(indices_to_delete, inplace=True) #^ the indices from the dataframe
+        self.df.reset_index(inplace = True, drop = True)
+        self.update_data_plot()
+        self.fig.canvas.draw()  
+
+    """---------------------------slider functions---------------------------"""
     def on_press(self, event):
         """Checks, in which slider axis we have clicked and stores this information"""
         for i in range(4):
@@ -420,8 +609,7 @@ class chooseablepoints:
                 upper = self.slider_bounds[i][1]
                 value = self.slider[i].val -.5
                 self.p[i] = lower + (upper - lower) * value
-        
-        self.fig.canvas.draw()
+                self.fig.canvas.draw()
 
     def on_motion(self, event):
         """If the mouse is moved, we check the valkue of the chosen slider
@@ -458,47 +646,7 @@ class chooseablepoints:
         #divided by the length of the dataset with a fudge factor of 1.5
         delta = abs(data[:,1].max() - data[:,1].min())
         self.slider_bounds[3] = self.p[3] + [ -delta/data.shape[0], delta/data.shape[0] ]
-                
-        
-    def delete_data(self):
-        """deletes the chosen data from the dataframe (data AND raw_data)"""
-        indices_to_delete = sorted(self.chosen_inds)
-        for index in self.chosen_inds[::-1]:
-            delind = next(delind for delind, value in enumerate(self.chosen_inds) if value == index)
-            #remove it from the list
-            self.chosen_inds.pop(delind)
-            #remove the corresponding plot
-            self.raw_plts[delind].remove()
-            #remove the entry in the list of plots
-            self.raw_plts.pop(delind)
-            self.df.raw_data[self.df.raw_data[:,8] == index][:,8] = -1 #mark the ones that can be deleted
-            """reduce the index of all entries with higher indices than the one we want to remove"""
-            self.df.raw_data[self.df.raw_data[:,8] > index][:,8] -= 1
-        self.df.raw_data = self.df.raw_data[self.df.raw_data[:,8] > -1]
-        self.update_chosen_plot()
-        self.erase_fit_plts()
-        self.info_index = None
-        self.update_info_plot()
 
-        try:
-            self.fit_est.set_data([[],[]])
-        except:
-            pass
-        self.df.drop(indices_to_delete, inplace=True) #delete the indices from the dataframe
-        self.df.reset_index(inplace = True, drop = True)
-        self.update_data_plot()
-        self.fig.canvas.draw()                
-#    def drift(self, p, z):
-#        return p[2] + p[3] * np.arange(z.shape[0])
-#
-#    def voltage(self, p, z):
-#        lam = 1.519 #in cm
-#        R=0.97       #in cm
-#        sum1 = 2*(R**2 +         (z - p[0])**2)**(-3/2.)                                
-#        sum2 =  -(R**2 + ( lam + (z - p[0]))**2)**(-3/2.)
-#        sum3 =  -(R**2 + (-lam + (z - p[0]))**2)**(-3/2.)
-#        return p[1]*(sum1+sum2+sum3)
-        
 def checkfit(self, abscissa = 'temperature'):
     if not hasattr(self, 'raw_data'):
         print('No raw data provided')
