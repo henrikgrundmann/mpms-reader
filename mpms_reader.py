@@ -53,7 +53,34 @@ def edgedetector(x_array):
     return values
 
 def read_custom_data(path):
-    
+    with open(path) as datei:
+        content = datei.readlines()
+    data_header = content[1].strip('#\n').split(',')
+    units = content[2].strip('#\n').split(',')
+    units = dict([data_header[index], unit] for index, unit in enumerate(units))
+    data = []
+    for index, line in enumerate(content[3:]):
+        if '#RAWDATA' in line:
+            raw_index = index
+            break
+        else:
+            data.append(map(float, line.strip().split(',')))
+    data = np.array(data)
+    data_frame = pd.DataFrame(data)
+    data_frame.units = units
+    data_frame.columns = data_header
+    try:
+        raw_data = []
+        raw_header = content[raw_index + 4].strip('#\n').split(',')
+        raw_data = []
+        for index, line in enumerate(content[raw_index + 5:]):
+            raw_data.append(map(float, line.strip().split(',')))
+        raw_data = np.array(raw_data)
+        data_frame.raw_data = raw_data
+        data_frame.raw_header = raw_header
+    except:
+        pass
+    return data_frame
 
 def read_from_mpms_data(path):
     """read data from the mpms into a data frame and return it"""
@@ -66,6 +93,12 @@ def read_from_mpms_data(path):
         data, raw_data = raw_reader(path)
         data_frame = pd.DataFrame(data)
         data_frame.raw_data = raw_data
+        data_frame.raw_header = ['time in s', 'field in Oe',\
+                                 'starting temperature in K',\
+                                 'end temperature in K', 'scan number',\
+                                 'z-position in cm', 'measured voltage in V',\
+                                 'sensitivity factor', 'measurement number']
+
     data_frame.columns = pd.Index(['time', 'magnetic field', 'temperature', 'magnetic moment'])
     data_frame['magnetic field'] *= 1e-4 #bringing the field to SI-units
     data_frame.units = {'time':'s', 'magnetic field':'T',\
@@ -142,6 +175,8 @@ def readdata(path, sourcetype='MPMS'):
         data_frame = read_from_mpms_data(path)
     elif sourcetype == 'nijmegen':
         data_frame = read_from_nijmegen_data(path)
+    elif sourcetype == 'custom':
+        data_frame = read_custom_data(path)
 
     data_frame.derivative = types.MethodType(derivative, data_frame)
     data_frame.smooth = types.MethodType(smooth, data_frame)
@@ -312,5 +347,6 @@ execfile('maganalyzer_functions.py')
 
 if __name__ == "__main__":
 #    ar = readdata('20160208_TlCuCl3_M(T,H)_1.8K-3.6K_5.8T-7T.rso.raw')
-    ar = readdata('mpms-testdata.rso.raw')
+    ar = readdata('mpms-testdata.rso.analyzed.data', sourcetype='custom')
+#    ar = readdata('mpms-testdata.rso.raw')
     ar.checkfit(abscissa='temperature')
