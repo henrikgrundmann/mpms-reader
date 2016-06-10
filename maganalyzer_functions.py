@@ -42,7 +42,7 @@ def raw_reader(filename):
             if diagflag:
                 diag_mask = np.where(data_diag[:, 0] == time)
                 line = data_diag[diag_mask][scan_number -1]
-                data_raw[mask_raw, 7] = _sens_fac(line[1:]) #plugging in the sensitivity factor
+                data_raw[mask_raw, 7] = _sens_quotient(line[1:]) #plugging in the sensitivity factor
 
             """----------Calculate the fit----------"""
             #getting the average field (should be constant)
@@ -93,7 +93,7 @@ def _UtoM(voltage):
     moment = voltage * rso_cal_fac * long_reg_fac / squid_cal_fac / corr_fac
     return moment
 
-def _sens_fac(arg):
+def _sens_quotient(arg):
     """
     input: range code and gain code    
     """
@@ -193,12 +193,12 @@ class chooseablepoints:
         pnames = ['z0', 'V', 'B0', 'B1']
 
         """prepare the figure and axes---"""
-        self.fig = plt.figure(figsize=(13,10))
-        self.ax1 = self.fig.add_axes([0.1,0.65,.6,.25])
+        self.fig = plt.figure(figsize=(13,12))
+        self.ax1 = self.fig.add_axes([0.1,0.65,.4,.25])
         self.ax1.xaxis.set_label_coords(.5, -.15)
         self.ax1.yaxis.set_label_coords(-.08, .5)
 
-        self.ax2 = self.fig.add_axes([0.1,0.3,.6,.25])
+        self.ax2 = self.fig.add_axes([0.1,0.3,.4,.25])
         self.ax2.set_xlabel('z-position in cm')
         self.ax2.xaxis.set_label_coords(.5, -.15)
         self.ax2.set_ylabel('signal in V')
@@ -206,13 +206,37 @@ class chooseablepoints:
         plt.setp(self.ax2.get_xticklabels(), visible=False) #looks nicer if the axis starts blank
         plt.setp(self.ax2.get_yticklabels(), visible=False)#looks nicer if the axis starts blank
 
-        self.radio_x_axis = self.fig.add_axes([0.8, 0.65, .2, .2])
+        self.radio_x_axis = self.fig.add_axes([0.8, 0.65, .2, .2], axisbg=(0.7, 0.7, 0.9))
         self.radio_x_buttons = widgets.RadioButtons(self.radio_x_axis, self.df.columns, active = list(self.df.columns).index('temperature'))
         self.radio_x_buttons.on_clicked(self.on_clicked_radiox)
-        self.radio_y_axis = self.fig.add_axes([0.8, 0.45, .2, .2])
+        self.radio_y_axis = self.fig.add_axes([0.8, 0.45, .2, .2], axisbg=(0.9, 0.7, 0.9))
         self.radio_y_buttons = widgets.RadioButtons(self.radio_y_axis,  self.df.columns, active = list(self.df.columns).index('magnetic moment'))
         self.radio_y_buttons.on_clicked(self.on_clicked_radioy)
 
+        self.bounds_to_change = 'temperature' 
+        self.radio_bounds_axis = self.fig.add_axes([0.8, 0.25, .2, .2], axisbg=(1, 0.6, 0.0))
+        self.radio_bounds_buttons = widgets.RadioButtons(self.radio_bounds_axis, self.df.columns, active = list(self.df.columns).index(self.bounds_to_change))
+        self.radio_bounds_buttons.on_clicked(self.on_clicked_radio_bounds)
+
+        self.bounds = dict((name, [min(self.df[name]), max(self.df[name])]) for name in self.df.columns)
+        self.overall_bounds = self.bounds.copy()
+        self.current_line_bounds = self.overall_bounds['temperature']
+        
+        self.bounds_axis = self.fig.add_axes([0.6, 0.3, .1, .6], axisbg=(1, 0.6, 0.0))
+        self.bounds_axis.set_xticks([])
+        
+        self.bounds_axis.set_yticks([])
+        self.bounds_axis.set_xlim((-.1,.1))
+        self.bounds_axis.set_ylim((-.1,1.1))
+        self.change_bounds=0
+#        self.bounds_axis.add_patch(patches.Rectangle((-0.1, -0.1),0.2,0.1,))
+#        self.bounds_axis.add_patch(patches.Rectangle((-0.1, 1.0),0.2,0.1,))
+        self.bound_line = [self.bounds_axis.axhline(y=0, linewidth=5, color='k'),
+                           self.bounds_axis.axhline(y=1, linewidth=5, color='k')]
+
+        self.bound_text = [self.bounds_axis.text(.1, 0, '{0:g}{1}'.format(self.current_line_bounds[0], self.df.units[self.bounds_to_change]), ha = 'left', va='center'),
+                           self.bounds_axis.text(-.1, 1, '{0:g}{1}'.format(self.current_line_bounds[1], self.df.units[self.bounds_to_change]), ha = 'right', va='center')]
+        
         for side in self.ax2.spines: 
             self.ax2.spines[side].set_color('red')
             self.ax2.spines[side].set_linewidth(4)
@@ -256,6 +280,8 @@ class chooseablepoints:
                                               slidermin=None, slidermax=None, dragging=True))
 
             self.slider_bounds.append([0,1])
+
+
         """------set the flags------"""
         self.add_enabled = False
 
@@ -326,10 +352,14 @@ class chooseablepoints:
         self.fig.canvas.draw()
 #
     def update_data_plot(self):
-        self.ax1.set_xlabel(self.abscissa + ' in ' + self.df.units[self.abscissa])
-        self.ax1.set_ylabel(self.ordinate + ' in ' + self.df.units[self.ordinate])
+        self.ax1xlabel = self.ax1.set_xlabel(self.abscissa + ' in ' + self.df.units[self.abscissa])
+        self.ax1xlabel.set_color('blue')
+        self.ax1ylabel = self.ax1.set_ylabel(self.ordinate + ' in ' + self.df.units[self.ordinate])
+        self.ax1ylabel.set_color('m')
         try:
-            self.data_plt.set_data(self.df[self.abscissa], self.df[self.ordinate])
+            condition = np.all(np.array([(self.df[name] >= self.bounds[name][0]) & (self.df[name] <= self.bounds[name][1]) for name in self.df.columns]), axis =0)
+            #condition = np.all(np.array([(ar[name] > ar.c.bounds[name][0]) & (ar[name] < ar.c.bounds[name][1]) for name in ar.columns]), axis =0)
+            self.data_plt.set_data(self.df[self.abscissa].where(condition), self.df[self.ordinate].where(condition))
         except Exception as error:
             self.data_plt,   = self.ax1.plot(self.df[self.abscissa], self.df[self.ordinate], 'bo', markersize = 4, picker = 8)
 
@@ -475,7 +505,7 @@ class chooseablepoints:
         
         self.ax2.relim()      # make sure all the data fits
         self.ax2.autoscale()
-        self.p = init_params(data[:, 5:7])
+        self.p = init_params(np.c_[z, U])
         self.update_fit_est()
         self.set_slider_bounds(z, U)
         
@@ -632,19 +662,42 @@ class chooseablepoints:
     """---------------------------slider functions---------------------------"""
     def on_press(self, event):
         """Checks, in which slider axis we have clicked and stores this information"""
-        for i in range(4):
-            if event.inaxes == self.slider_axes[i]:
-                self.chosen_slider = self.slider[i]
-                lower = self.slider_bounds[i][0]
-                upper = self.slider_bounds[i][1]
-                value = self.slider[i].val -.5
-                self.p[i] = lower + (upper - lower) * value
+        if event.inaxes==self.bounds_axis:
+            y_pos = event.ydata
+            if abs(y_pos-self.bound_line[0].get_ydata()[0]) < .01:
+                self.change_bounds=1
+            elif abs(y_pos-self.bound_line[1].get_ydata()[0]) < .01:
+                self.change_bounds=2
+        else:
+            for i in range(4):
+                if event.inaxes == self.slider_axes[i]:
+                    self.chosen_slider = self.slider[i]
+                    lower = self.slider_bounds[i][0]
+                    upper = self.slider_bounds[i][1]
+                    value = self.slider[i].val -.5
+                    self.p[i] = lower + (upper - lower) * value
         self.fig.canvas.draw()
 
     def on_motion(self, event):
         """If the mouse is moved, we check the value of the chosen slider
         this is necessary because slider.on_changed does not allow to identify
         the slider which has changed it value"""
+        if self.change_bounds > 0:
+            y_neu = event.ydata
+            if 0 < y_neu < 1:
+                self.bound_line[self.change_bounds - 1].set_ydata([y_neu, y_neu])
+                self.bound_text[self.change_bounds - 1].set_y(y_neu)
+                lower = min(self.bound_line[0].get_ydata()[0], self.bound_line[1].get_ydata()[0])
+                upper = max(self.bound_line[0].get_ydata()[0], self.bound_line[1].get_ydata()[0])
+                delta = self.current_line_bounds[1] - self.current_line_bounds[0]
+                lower = self.current_line_bounds[0] + delta * lower
+                upper = self.current_line_bounds[0] + delta * upper
+                self.bounds[self.bounds_to_change] = [lower, upper]
+                new_text = '{0:g}{1}'.format(self.current_line_bounds[0] + delta * y_neu, self.df.units[self.bounds_to_change])
+                self.bound_text[self.change_bounds - 1].set_text(new_text)
+                self.update_data_plot()
+                
+                self.fig.canvas.draw()
         if self.chosen_slider is None: return
         if len(self.chosen_inds) == 0: return
         for i in range(4):
@@ -658,7 +711,30 @@ class chooseablepoints:
         
     def on_release(self, event):
         self.chosen_slider = None
+        self.change_bounds = 0
         
+    def on_clicked_radio_bounds(self, label):
+        self.current_line_bounds = self.overall_bounds[label]
+        self.bounds_to_change = label
+        lower, upper = self.bounds[self.bounds_to_change]
+        new_text = '{0:g}{1}'.format(lower, 
+                                     self.df.units[self.bounds_to_change])
+        self.bound_text[0].set_text(new_text)
+        new_text = '{0:g}{1}'.format(upper, 
+                                     self.df.units[self.bounds_to_change])
+        self.bound_text[1].set_text(new_text)
+
+        delta_overall = self.current_line_bounds[1] - self.current_line_bounds[0]
+        if abs(delta_overall) > 0:
+            lower = (lower - self.current_line_bounds[0]) / delta_overall
+            upper = (upper - self.current_line_bounds[0]) / delta_overall
+            self.bound_line[0].set_ydata([lower, lower])
+            self.bound_line[1].set_ydata([upper, upper])
+            self.bound_text[0].set_y(lower)
+            self.bound_text[1].set_y(upper)
+        self.fig.canvas.draw()
+
+
     def set_slider_bounds(self, z, U):
         """calculates the boundaries of the sliders according to the data as the slider boundaries itself can not be changed
         """
